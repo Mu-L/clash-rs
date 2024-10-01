@@ -2,22 +2,41 @@
 port: 8888
 socks-port: 8889
 mixed-port: 8899
+tproxy-port: 8900
 
 tun:
   enable: false
   device-id: "dev://utun1989"
+  route-all: false
+  gateway: "198.19.0.1/32"
+  so-mark: 3389
+  # routes:
+  #   - 0.0.0.0/1
+  #   - 128.0.0.0/1
 
 ipv6: true
 
 dns:
   enable: true
   ipv6: true
-  listen: 127.0.0.1:53553
-  #   udp: 127.0.0.1:53553
-  #   tcp: 127.0.0.1:53553
-  #   dot: 127.0.0.1:53554
-  #   doh: 127.0.0.1:53555
-
+  listen:
+    udp: 127.0.0.1:53553
+    tcp: 127.0.0.1:53553
+    dot:
+      addr: 127.0.0.1:53554
+      ca-cert: dns.crt
+      ca-key: dns.key
+    doh:
+      addr: 127.0.0.1:53555
+      ca-cert: dns.crt
+      ca-key: dns.key
+      hostname: dns.example.com
+    doh3:
+      addr: 127.0.0.1:53555
+      ca-cert: dns.crt
+      ca-key: dns.key
+      hostname: dns.example.com
+        
   # ipv6: false # when the false, response to AAAA questions will be empty
 
   # These nameservers are used to resolve the DNS nameserver hostnames below.
@@ -42,17 +61,19 @@ dns:
   nameserver:
     # - 114.114.114.114 # default value
     # - 1.1.1.1#auto # default value
-    - tls://1.1.1.1:853#en0 # DNS over TLS
+    - tls://1.1.1.1:853#auto # DNS over TLS
 #    - dhcp://en0 # dns from dhcp
 
 allow-lan: true
 mode: rule
-log-level: debug
+log-level: trace
 external-controller: :9090
 external-ui: "public"
 # secret: "clash-rs"
 experimental:
   ignore-resolve-fail: true
+
+asn-mmdb: Country-asn.mmdb
 
 profile:
   store-selected: true
@@ -82,7 +103,7 @@ proxy-groups:
       # - "h2-vmess"
       # - "tls-vmess"
       # - "grpc-vmess"
-      # - "ss-simple"
+      - "ss-simple"
       # - "trojan"
       # - "auto"
       # - "fallback-auto"
@@ -278,6 +299,8 @@ rule-providers:
     behavior: domain
 
 rules:
+  - IP-CIDR,1.1.1.1/32,udp-relay
+  - IP-CIDR,8.8.8.8/32,udp-relay
   - DOMAIN,google.com,ws-vmess
   - DOMAIN-KEYWORD,httpbin,trojan-grpc
   - DOMAIN,ipinfo.io,DIRECT

@@ -2,6 +2,7 @@ use super::{datagram::TunDatagram, netstack};
 use std::{net::SocketAddr, sync::Arc};
 
 use futures::{SinkExt, StreamExt};
+
 use tracing::{debug, error, info, trace, warn};
 use tun::{Device, TunPacket};
 use url::Url;
@@ -10,16 +11,25 @@ use crate::{
     app::{dispatcher::Dispatcher, dns::ThreadSafeDNSResolver},
     common::errors::{map_io_error, new_io_error},
     config::internal::config::TunConfig,
-    proxy::{datagram::UdpPacket, utils::get_outbound_interface},
+    proxy::{
+        datagram::UdpPacket, tun::routes::maybe_add_routes,
+        utils::get_outbound_interface,
+    },
     session::{Network, Session, SocksAddr, Type},
     Error, Runner,
 };
+
+use crate::{defer, proxy::tun::routes};
+
+const DEFAULT_SO_MARK: u32 = 3389;
+const DEFAULT_ROUTE_TABLE: u32 = 2468;
 
 async fn handle_inbound_stream(
     stream: netstack::TcpStream,
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
     dispatcher: Arc<Dispatcher>,
+    so_mark: u32,
 ) {
     let sess = Session {
         network: Network::Tcp,
@@ -34,6 +44,7 @@ async fn handle_inbound_stream(
                     x
                 );
             }),
+        so_mark: Some(so_mark),
         ..Default::default()
     };
 
@@ -45,10 +56,9 @@ async fn handle_inbound_datagram(
     socket: Box<netstack::UdpSocket>,
     dispatcher: Arc<Dispatcher>,
     resolver: ThreadSafeDNSResolver,
+    so_mark: u32,
 ) {
-    let local_addr = socket.local_addr();
     // tun i/o
-
     let (ls, mut lr) = socket.split();
     let ls = Arc::new(ls);
 
@@ -61,7 +71,7 @@ async fn handle_inbound_datagram(
     // for dispatcher - the dispatcher would receive packets from this channel,
     // which is from the stack and send back packets to this channel, which
     // is to the tun
-    let udp_stream = TunDatagram::new(l_tx, d_rx, local_addr);
+    let udp_stream = TunDatagram::new(l_tx, d_rx);
 
     let sess = Session {
         network: Network::Udp,
@@ -71,7 +81,7 @@ async fn handle_inbound_datagram(
             .inspect(|x| {
                 debug!("selecting outbound interface: {:?} for tun UDP traffic", x);
             }),
-
+        so_mark: Some(so_mark),
         ..Default::default()
     };
 
@@ -148,9 +158,9 @@ pub fn get_runner(
         return Ok(None);
     }
 
-    let device_id = cfg.device_id;
+    let device_id = &cfg.device_id;
 
-    let u = Url::parse(&device_id)
+    let u = Url::parse(device_id)
         .map_err(|x| Error::InvalidConfig(format!("tun device {}", x)))?;
 
     let mut tun_cfg = tun::Configuration::default();
@@ -177,7 +187,12 @@ pub fn get_runner(
         }
     }
 
-    tun_cfg.up();
+    let gw = cfg.gateway;
+    tun_cfg
+        .address(gw.addr())
+        .netmask(gw.netmask())
+        .mtu(cfg.mtu.unwrap_or(if cfg!(windows) { 65535 } else { 1500 }))
+        .up();
 
     let tun = tun::create_as_async(&tun_cfg)
         .map_err(|x| new_io_error(format!("failed to create tun device: {}", x)))?;
@@ -185,10 +200,29 @@ pub fn get_runner(
     let tun_name = tun.get_ref().name().map_err(map_io_error)?;
     info!("tun started at {}", tun_name);
 
+    let mut cfg = cfg;
+    cfg.route_table = cfg.route_table.or(Some(DEFAULT_ROUTE_TABLE));
+    cfg.so_mark = cfg.so_mark.or(Some(DEFAULT_SO_MARK));
+
+    maybe_add_routes(&cfg, &tun_name)?;
+
     let (stack, mut tcp_listener, udp_socket) =
         netstack::NetStack::with_buffer_size(512, 256).map_err(map_io_error)?;
 
     Ok(Some(Box::pin(async move {
+        defer! {
+            warn!("cleaning up routes");
+
+            match routes::maybe_routes_clean_up(&cfg) {
+                Ok(_) => {}
+                Err(e) => {
+                    error!("failed to clean up routes: {}", e);
+                }
+            }
+        }
+
+        let so_mark = cfg.so_mark.unwrap();
+
         let framed = tun.into_framed();
 
         let (mut tun_sink, mut tun_stream) = framed.split();
@@ -250,6 +284,7 @@ pub fn get_runner(
                     local_addr,
                     remote_addr,
                     dsp.clone(),
+                    so_mark,
                 ));
             }
 
@@ -257,7 +292,7 @@ pub fn get_runner(
         }));
 
         futs.push(Box::pin(async move {
-            handle_inbound_datagram(udp_socket, dispatcher, resolver).await;
+            handle_inbound_datagram(udp_socket, dispatcher, resolver, so_mark).await;
             Err(Error::Operation("tun stopped unexpectedly 3".to_string()))
         }));
 

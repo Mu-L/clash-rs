@@ -256,7 +256,7 @@ impl DockerTestRunnerBuilder {
     pub fn sysctls(mut self, sysctls: &[(&str, &str)]) -> Self {
         self.host_config.sysctls = Some(
             sysctls
-                .into_iter()
+                .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect::<HashMap<_, _>>(),
         );
@@ -305,32 +305,30 @@ impl DockerTestRunnerBuilder {
 }
 
 pub fn get_host_config(port: u16) -> HostConfig {
-    let mut host_config = HostConfig::default();
-    // we need to use the host mode to enable the benchmark function
-    #[cfg(not(target_os = "macos"))]
-    {
-        host_config.network_mode = Some("host".to_owned());
+    HostConfig {
+        port_bindings: Some(
+            [
+                (
+                    (format!("{}/tcp", port)),
+                    Some(vec![PortBinding {
+                        host_ip: Some("0.0.0.0".to_owned()),
+                        host_port: Some(format!("{}", port)),
+                    }]),
+                ),
+                (
+                    (format!("{}/udp", port)),
+                    Some(vec![PortBinding {
+                        host_ip: Some("0.0.0.0".to_owned()),
+                        host_port: Some(format!("{}", port)),
+                    }]),
+                ),
+            ]
+            .into_iter()
+            .collect::<HashMap<_, _>>(),
+        ),
+        // we need to use the host mode to enable the benchmark function
+        #[cfg(not(target_os = "macos"))]
+        network_mode: Some("host".to_owned()),
+        ..Default::default()
     }
-    host_config.port_bindings = Some(
-        [
-            (
-                (format!("{}/tcp", port)),
-                Some(vec![PortBinding {
-                    host_ip: Some("0.0.0.0".to_owned()),
-                    host_port: Some(format!("{}", port)),
-                }]),
-            ),
-            (
-                (format!("{}/udp", port)),
-                Some(vec![PortBinding {
-                    host_ip: Some("0.0.0.0".to_owned()),
-                    host_port: Some(format!("{}", port)),
-                }]),
-            ),
-        ]
-        .into_iter()
-        .collect::<HashMap<_, _>>(),
-    );
-
-    host_config
 }

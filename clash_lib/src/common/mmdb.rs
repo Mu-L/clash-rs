@@ -4,9 +4,11 @@ use maxminddb::geoip2;
 use tracing::{debug, info, warn};
 
 use crate::{
-    common::{errors::map_io_error, http::HttpClient, utils::download},
+    common::{errors::map_io_error, utils::download},
     Error,
 };
+
+use super::http::HttpClient;
 
 pub struct Mmdb {
     reader: maxminddb::Reader<Vec<u8>>,
@@ -90,9 +92,13 @@ impl Mmdb {
         }
     }
 
-    pub fn lookup(&self, ip: IpAddr) -> std::io::Result<geoip2::Country> {
+    pub fn lookup_contry(&self, ip: IpAddr) -> std::io::Result<geoip2::Country> {
         self.reader
             .lookup::<geoip2::Country>(ip)
             .map_err(map_io_error)
+    }
+
+    pub fn lookup_asn(&self, ip: IpAddr) -> std::io::Result<geoip2::Asn> {
+        self.reader.lookup::<geoip2::Asn>(ip).map_err(map_io_error)
     }
 }

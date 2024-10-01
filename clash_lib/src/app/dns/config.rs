@@ -1,14 +1,14 @@
 use std::{
     collections::HashMap,
     fmt::Display,
-    io::BufReader,
     net::{IpAddr, SocketAddr},
     sync::Arc,
 };
 
 use ipnet::AddrParseError;
 use regex::Regex;
-use rustls::{Certificate, PrivateKey};
+
+use serde::Deserialize;
 use url::Url;
 
 use crate::{
@@ -17,10 +17,7 @@ use crate::{
     Error,
 };
 
-use super::{
-    dns_client::DNSNetMode,
-    dummy_keys::{TEST_CERT, TEST_KEY},
-};
+use super::dns_client::DNSNetMode;
 
 #[derive(Clone, Debug)]
 pub struct NameServer {
@@ -48,23 +45,42 @@ pub struct FallbackFilter {
     pub domain: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct DoHConfig {
-    pub certificate_and_key: (Vec<Certificate>, PrivateKey),
-    pub dns_hostname: Option<String>,
+    pub addr: SocketAddr,
+    pub ca_cert: DnsServerCert,
+    pub ca_key: DnsServerKey,
+    pub hostname: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct DoH3Config {
+    pub addr: SocketAddr,
+    pub ca_cert: DnsServerCert,
+    pub ca_key: DnsServerKey,
+    pub hostname: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct DoTConfig {
-    pub certificate_and_key: (Vec<Certificate>, PrivateKey),
+    pub addr: SocketAddr,
+    pub ca_cert: DnsServerCert,
+    pub ca_key: DnsServerKey,
 }
 
-#[derive(Clone, Debug, Default)]
+pub type DnsServerKey = Option<String>;
+pub type DnsServerCert = Option<String>;
+
+#[derive(Debug, Default)]
 pub struct DNSListenAddr {
     pub udp: Option<SocketAddr>,
     pub tcp: Option<SocketAddr>,
-    pub doh: Option<(SocketAddr, DoHConfig)>,
-    pub dot: Option<(SocketAddr, DoTConfig)>,
+    pub doh: Option<DoHConfig>,
+    pub dot: Option<DoTConfig>,
+    pub doh3: Option<DoH3Config>,
 }
 
 #[derive(Default)]
@@ -274,76 +290,79 @@ impl TryFrom<&crate::config::def::Config> for Config {
                         let mut udp = None;
                         let mut tcp = None;
                         let mut doh = None;
+                        let mut doh3 = None;
                         let mut dot = None;
 
                         for (k, v) in map {
-                            let addr = v.parse::<SocketAddr>().map_err(|_| {
-                                Error::InvalidConfig(format!(
-                                    "invalid DNS listen address: {} -> {}",
-                                    k, v
-                                ))
-                            })?;
                             match k.as_str() {
-                                "udp" => udp = Some(addr),
-                                "tcp" => tcp = Some(addr),
+                                "udp" => {
+                                    let addr = v
+                                        .as_str()
+                                        .ok_or(Error::InvalidConfig(format!(
+                                            "invalid udp dns listen address - must \
+                                             be string: {:?}",
+                                            v
+                                        )))?
+                                        .parse::<SocketAddr>()
+                                        .map_err(|_| {
+                                            Error::InvalidConfig(format!(
+                                                "invalid dns listen address: {:?}",
+                                                v
+                                            ))
+                                        })?;
+                                    udp = Some(addr)
+                                }
+                                "tcp" => {
+                                    let addr = v
+                                        .as_str()
+                                        .ok_or(Error::InvalidConfig(format!(
+                                            "invalid tcp dns listen address - must \
+                                             be string: {:?}",
+                                            v
+                                        )))?
+                                        .parse::<SocketAddr>()
+                                        .map_err(|_| {
+                                            Error::InvalidConfig(format!(
+                                                "invalid dns listen address: {:?}",
+                                                v
+                                            ))
+                                        })?;
+                                    tcp = Some(addr)
+                                }
                                 "doh" => {
-                                    let mut buf_read: Box<dyn std::io::BufRead> =
-                                        Box::new(BufReader::new(
-                                            TEST_CERT.as_bytes(),
-                                        ));
-                                    let certs = rustls_pemfile::certs(&mut buf_read)
-                                        .unwrap()
-                                        .into_iter()
-                                        .map(Certificate)
-                                        .collect::<Vec<_>>();
+                                    let c =
+                                        DoHConfig::deserialize(v).map_err(|x| {
+                                            Error::InvalidConfig(format!(
+                                                "invalid doh dns listen config: \
+                                                 {:?}",
+                                                x
+                                            ))
+                                        })?;
 
-                                    let mut buf_read: Box<dyn std::io::BufRead> =
-                                        Box::new(BufReader::new(
-                                            TEST_KEY.as_bytes(),
-                                        ));
-                                    let mut keys =
-                                        rustls_pemfile::pkcs8_private_keys(
-                                            &mut buf_read,
-                                        )
-                                        .unwrap();
-                                    let c = DoHConfig {
-                                        certificate_and_key: (
-                                            certs,
-                                            PrivateKey(keys.remove(0)),
-                                        ),
-                                        dns_hostname: Some(
-                                            "dns.example.com".to_owned(),
-                                        ),
-                                    };
-                                    doh = Some((addr, c))
+                                    doh = Some(c)
                                 }
                                 "dot" => {
-                                    let mut buf_read: Box<dyn std::io::BufRead> =
-                                        Box::new(BufReader::new(
-                                            TEST_CERT.as_bytes(),
-                                        ));
-                                    let certs = rustls_pemfile::certs(&mut buf_read)
-                                        .unwrap()
-                                        .into_iter()
-                                        .map(Certificate)
-                                        .collect::<Vec<_>>();
+                                    let c =
+                                        DoTConfig::deserialize(v).map_err(|x| {
+                                            Error::InvalidConfig(format!(
+                                                "invalid dot dns listen config: \
+                                                 {:?}",
+                                                x
+                                            ))
+                                        })?;
+                                    dot = Some(c)
+                                }
+                                "doh3" => {
+                                    let c =
+                                        DoH3Config::deserialize(v).map_err(|x| {
+                                            Error::InvalidConfig(format!(
+                                                "invalid doh3 dns listen config: \
+                                                 {:?}",
+                                                x
+                                            ))
+                                        })?;
 
-                                    let mut buf_read: Box<dyn std::io::BufRead> =
-                                        Box::new(BufReader::new(
-                                            TEST_KEY.as_bytes(),
-                                        ));
-                                    let mut keys =
-                                        rustls_pemfile::pkcs8_private_keys(
-                                            &mut buf_read,
-                                        )
-                                        .unwrap();
-                                    let c = DoTConfig {
-                                        certificate_and_key: (
-                                            certs,
-                                            PrivateKey(keys.remove(0)),
-                                        ),
-                                    };
-                                    dot = Some((addr, c))
+                                    doh3 = Some(c)
                                 }
                                 _ => {
                                     return Err(Error::InvalidConfig(format!(
@@ -354,7 +373,13 @@ impl TryFrom<&crate::config::def::Config> for Config {
                             }
                         }
 
-                        Ok(DNSListenAddr { udp, tcp, doh, dot })
+                        Ok(DNSListenAddr {
+                            udp,
+                            tcp,
+                            doh,
+                            dot,
+                            doh3,
+                        })
                     }
                 })
                 .transpose()?
